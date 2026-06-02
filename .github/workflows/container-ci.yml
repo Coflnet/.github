@@ -69,10 +69,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2  # v3.10.0
+        uses: docker/setup-buildx-action@v3
 
       - name: Derive image name from repo
         id: image
@@ -84,7 +84,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804  # v5.7.0
+        uses: docker/metadata-action@v5
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
@@ -92,7 +92,7 @@ jobs:
             type=ref,event=branch
 
       - name: Build and export tarball
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6.15.0
+        uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
@@ -105,7 +105,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Upload image artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@v4
         with:
           name: image-${{ github.sha }}
           path: /tmp/image.tar
@@ -126,10 +126,10 @@ jobs:
 
     steps:
       - name: Checkout (for Dockerfile context in SARIF)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@v4
 
       - name: Download image artifact
-        uses: actions/download-artifact@95815c38cf7179ad29e24c73b5e93e7f522ea44c  # v4.3.0
+        uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build.outputs.artifact_name }}
           path: /tmp
@@ -139,7 +139,7 @@ jobs:
 
       - name: Scan for vulnerabilities
         id: scan
-        uses: crazy-max/ghaction-container-scan@3d72b4a567d7bfbad82d4e22460c5b3f5ebd7c2c  # v4.0.0
+        uses: crazy-max/ghaction-container-scan@v4
         with:
           image: ${{ needs.build.outputs.image_ref }}
           dockerfile: ${{ inputs.dockerfile }}
@@ -148,7 +148,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security
         if: steps.scan.outputs.sarif != ''
-        uses: github/codeql-action/upload-sarif@1f494c3b3d2c7ef79279753b6d5bb89e14db36be  # v3.28.20
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ steps.scan.outputs.sarif }}
 
@@ -166,7 +166,7 @@ jobs:
 
     steps:
       - name: Download image artifact
-        uses: actions/download-artifact@95815c38cf7179ad29e24c73b5e93e7f522ea44c  # v4.3.0
+        uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build.outputs.artifact_name }}
           path: /tmp
@@ -175,7 +175,7 @@ jobs:
         run: docker load --input /tmp/image.tar
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@74a5d142397b44f367a81161e363641408b11bf5  # v3.4.0
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ secrets.ghcr_username }}
@@ -200,7 +200,7 @@ jobs:
 
     steps:
       - name: Checkout Fleet repo
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.fleet_repo }}
           token: ${{ secrets.fleet_pat }}
@@ -226,7 +226,7 @@ jobs:
           cat "$FILE"
 
       - name: Create promotion PR
-        uses: peter-evans/create-pull-request@271a8d0340265f705b14b6d32b9829c1cb33d45e  # v7.0.8
+        uses: peter-evans/create-pull-request@v7
         with:
           path: fleet
           commit-message: "chore(${{ github.event.repository.name }}): deploy image ${{ github.sha }}"

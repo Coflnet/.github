@@ -61,7 +61,9 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     outputs:
-      image_ref: ${{ steps.meta.outputs.tags }}
+      # metadata-action outputs multiple tags separated by newlines.
+      # Trivy needs a single image reference, so we pick the first tag.
+      image_ref: ${{ steps.first-tag.outputs.tag }}
       artifact_name: image-${{ github.sha }}
     permissions:
       contents: read             # only needed for checkout
@@ -90,6 +92,13 @@ jobs:
           tags: |
             type=sha,prefix=,format=short
             type=ref,event=branch
+
+      - name: Extract first tag for scan reference
+        id: first-tag
+        run: |
+          # metadata outputs multiple tags (short sha + branch name).
+          # Trivy needs a single image reference — use the first one.
+          echo "tag=$(echo '${{ steps.meta.outputs.tags }}' | head -1)" >> "$GITHUB_OUTPUT"
 
       - name: Build and export tarball
         uses: docker/build-push-action@v6

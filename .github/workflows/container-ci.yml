@@ -61,9 +61,10 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     outputs:
-      # metadata-action outputs multiple tags separated by newlines.
-      # Trivy needs a single image reference, so we pick the first tag.
-      image_ref: ${{ steps.first-tag.outputs.tag }}
+      # Single tag for Trivy scan (needs exactly one reference)
+      image_single: ${{ steps.first-tag.outputs.tag }}
+      # All tags for docker push
+      image_tags: ${{ steps.meta.outputs.tags }}
       artifact_name: image-${{ github.sha }}
     permissions:
       contents: read             # only needed for checkout
@@ -150,7 +151,7 @@ jobs:
         id: scan
         uses: crazy-max/ghaction-container-scan@v4
         with:
-          image: ${{ needs.build.outputs.image_ref }}
+          image: ${{ needs.build.outputs.image_single }}
           dockerfile: ${{ inputs.dockerfile }}
           severity_threshold: ${{ inputs.severity_threshold }}
           annotations: true
@@ -192,7 +193,7 @@ jobs:
 
       - name: Push image
         run: |
-          docker push ${{ needs.build.outputs.image_ref }}
+          docker push ${{ needs.build.outputs.image_tags }}
 
   # ═══════════════════════════════════════════════════════════════════
   # PROMOTE: Optional — update Fleet deployment after successful push.
@@ -244,7 +245,7 @@ jobs:
           body: |
             Automated promotion after successful build + scan.
 
-            - **Image**: `${{ needs.build.outputs.image_ref }}`
+            - **Image**: `${{ needs.build.outputs.image_tags }}`
             - **Commit**: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
             - **Workflow**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           delete-branch: true

@@ -1,13 +1,25 @@
 # ═══════════════════════════════════════════════════════════════════════
-# Reusable workflow: Build → Scan → Push → Promote
+# Reusable workflow: Build → Push to GHCR → Signal Argo via OIDC webhook
 # Location: Coflnet/.github/.github/workflows/container-ci.yml
 #
-# SECURITY:
-# - This file lives in a protected repo. Callers cannot modify it.
-# - Image name is derived from repo name, MUST use muehlhansfl/ namespace.
-# - Registry credentials are stored in THIS repo only — callers never
-#   pass them. A compromised caller repo cannot exfiltrate tokens.
-# - Scan gates push: no push if Trivy finds HIGH+ CVEs.
+# SECURITY MODEL (defense in depth):
+# 1. Build runs on GitHub's ephemeral runners — NO cluster access.
+# 2. Image pushed to ghcr.io/coflnet/<repo> — private by default,
+#    readable only by the cluster's ghcr-read token (OpenBao).
+# 3. GitHub mints a cryptographically signed OIDC JWT (RS256) and
+#    POSTs it to Argo Events. An attacker cannot forge the JWT
+#    because they don't have GitHub's private signing key.
+# 4. Argo verifies the JWT against GitHub's JWKS, extracts the
+#    authenticated `repository` claim, and cross-checks it against
+#    the pull request. The webhook body is NOT trusted alone.
+# 5. Trivy scan runs INSIDE the cluster (authoritative gate) before
+#    the image is promoted to Docker Hub. No Docker Hub creds exist
+#    on GitHub runners.
+#
+# SECRETS: Build-time secrets (NuGet, HuggingFace, Nuxt license) are
+# stored as ORGANIZATION secrets in the Coflnet org. Caller workflows
+# do NOT pass them — they are resolved automatically. Docker Hub
+# credentials NEVER touch GitHub runners.
 # ═══════════════════════════════════════════════════════════════════════
 
 name: Container CI
@@ -18,44 +30,48 @@ on:
       dockerfile:
         type: string
         default: "./Dockerfile"
+        description: "Path to Dockerfile, relative to the context directory"
       context:
         type: string
         default: "."
+        description: "Build context directory (git repo is pre-checked-out)"
       platforms:
         type: string
         default: "linux/amd64"
-      severity_threshold:
-        type: string
-        default: "HIGH"
       k8s_file:
         type: string
         default: ""
-        description: "Path in Coflnet/k8s to update (e.g. main/sky/chart/charts/sky-proxy/values.yaml)"
+        description: "Path in Coflnet/fleet to update (e.g. sky/chart/charts/sky-proxy/values.yaml)"
       k8s_image_key:
         type: string
         default: "image.tag"
-        description: "YAML key path to update"
+        description: "YAML key path to update (for the Argo promoter)"
+      # ── Optional: override the default branch tag ──
+      branch_tag:
+        type: string
+        default: ""
+        description: "Branch name for GHCR tag (defaults to github.ref_name)"
 
-# NOTE: No 'secrets:' declared. Registry credentials live in
-# THIS repo (Coflnet/.github → Settings → Secrets).
-# Caller workflows CANNOT access them.
+# NOTE: No 'secrets:' block declared. Build-time secrets
+# (NUGET_USERNAME, NUGET_PASSWORD, NUXT_UI_PRO_LICENSE, HF_TOKEN)
+# live as Coflnet org secrets — available to all repos in the org.
+
+permissions:
+  id-token: write   # Required for core.getIDToken() → OIDC JWT
+  packages: write   # Required for docker push to ghcr.io
+  contents: read    # Required for actions/checkout
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════
-  # BUILD: No secrets. No registry access. Just build and export.
+  # BUILD & PUSH to GHCR
   # ═══════════════════════════════════════════════════════════════════
   build:
-    name: Build
+    name: Build & Push GHCR
     runs-on: ubuntu-latest
     outputs:
-      # Single tag for Trivy scan (needs exactly one reference)
-      image_single: ${{ steps.first-tag.outputs.tag }}
-      # All tags for docker push
-      image_tags: ${{ steps.meta.outputs.tags }}
-      artifact_name: image-${{ github.sha }}
-    permissions:
-      contents: read             # only needed for checkout
-      packages: read             # for ghcr.io image pulls if any
+      ghcr_image: ${{ steps.ghcr-tag.outputs.image }}
+      ghcr_tag_sha: ${{ steps.ghcr-tag.outputs.tag_sha }}
+      ghcr_tag_branch: ${{ steps.ghcr-tag.outputs.tag_branch }}
 
     steps:
       - name: Checkout
@@ -64,167 +80,120 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Derive image name
-        id: image
+      - name: Derive image name and tags
+        id: ghcr-tag
         run: |
-          # SECURITY: image name is DERIVED. Caller cannot override.
-          # Must use muehlhansfl/ namespace — same as Argo template check.
-          REPO_LOWER="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
-          echo "name=docker.io/muehlhansfl/${REPO_LOWER}" >> "$GITHUB_OUTPUT"
+          # Image: ghcr.io/<owner>/<repo-lowercase>
+          REPO_LOWER="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${REPO_LOWER}"
+          TAG_SHA="${{ github.sha }}"
+          TAG_BRANCH="${{ inputs.branch_tag || github.ref_name }}"
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag_sha=${TAG_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag_branch=${TAG_BRANCH}" >> "$GITHUB_OUTPUT"
+
+          echo "::notice::Building ${IMAGE}:${TAG_SHA} (branch: ${TAG_BRANCH})"
+
+      - name: Inject NODE_USE_ENV_PROXY into Dockerfile
+        run: |
+          # Replicates the in-cluster Buildah behavior: inject
+          # ARG + ENV NODE_USE_ENV_PROXY after every FROM line so
+          # all build stages get proxy-aware Node.js resolution.
+          mkdir -p /tmp/ci-dockerfile
+          awk '
+            /^[[:space:]]*FROM[[:space:]]/ {
+              print
+              print "ARG NODE_USE_ENV_PROXY=1"
+              print "ENV NODE_USE_ENV_PROXY=${NODE_USE_ENV_PROXY}"
+              next
+            }
+            { print }
+          ' "${{ inputs.dockerfile }}" > /tmp/ci-dockerfile/Dockerfile
+          echo "::notice::Injected NODE_USE_ENV_PROXY after FROM lines"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          images: ${{ steps.image.outputs.name }}
-          tags: |
-            type=sha,prefix=,format=short
-            type=ref,event=branch
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract first tag for scan reference
-        id: first-tag
-        run: |
-          # metadata outputs multiple tags (short sha + branch name).
-          # Trivy needs a single image reference — use the first one.
-          echo "tag=$(echo '${{ steps.meta.outputs.tags }}' | head -1)" >> "$GITHUB_OUTPUT"
-
-      - name: Build and export tarball
+      - name: Build and Push to GHCR
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
-          file: ${{ inputs.dockerfile }}
+          file: /tmp/ci-dockerfile/Dockerfile
           platforms: ${{ inputs.platforms }}
-          # Export to tarball — NO push to registry here.
-          # This isolates registry credentials from the build.
-          outputs: type=docker,dest=/tmp/image.tar
-          tags: ${{ steps.meta.outputs.tags }}
+          push: true
+          tags: |
+            ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_sha }}
+            ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_branch }}
+          build-args: |
+            NODE_USE_ENV_PROXY=1
+            NUGET_USERNAME=${{ secrets.NUGET_USERNAME }}
+            NUGET_PASSWORD=${{ secrets.NUGET_PASSWORD }}
+            NUXT_UI_PRO_LICENSE=${{ secrets.NUXT_UI_PRO_LICENSE }}
+            HF_TOKEN=${{ secrets.HF_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: image-${{ github.sha }}
-          path: /tmp/image.tar
-          retention-days: 1  # short-lived — only needed for scan + push
-
   # ═══════════════════════════════════════════════════════════════════
-  # SCAN: Trivy vulnerability scan. Gates the push step.
+  # SIGNAL: Request OIDC JWT and webhook Argo Events
   # ═══════════════════════════════════════════════════════════════════
-  scan:
-    name: Scan
+  signal:
+    name: Signal Argo
     runs-on: ubuntu-latest
     needs: build
-    outputs:
-      passed: ${{ steps.scan.outcome == 'success' }}
     permissions:
-      contents: read
-      security-events: write   # for SARIF upload
+      id-token: write   # needed for core.getIDToken()
 
     steps:
-      - name: Checkout (for Dockerfile context in SARIF)
-        uses: actions/checkout@v4
-
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact_name }}
-          path: /tmp
-
-      - name: Load image into Docker
-        run: docker load --input /tmp/image.tar
-
-      - name: Scan for vulnerabilities
-        id: scan
-        uses: crazy-max/ghaction-container-scan@v4
-        with:
-          image: ${{ needs.build.outputs.image_single }}
-          dockerfile: ${{ inputs.dockerfile }}
-          severity_threshold: ${{ inputs.severity_threshold }}
-          annotations: true
-
-      - name: Upload SARIF to GitHub Security
-        if: steps.scan.outputs.sarif != ''
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: ${{ steps.scan.outputs.sarif }}
-
-  # ═══════════════════════════════════════════════════════════════════
-  # PUSH: Docker Hub. Only if scan passed. Credentials live in
-  # Coflnet/.github repo secrets — callers NEVER see them.
-  # ═══════════════════════════════════════════════════════════════════
-  push:
-    name: Push to Docker Hub
-    runs-on: ubuntu-latest
-    needs: [build, scan]
-    if: needs.scan.result == 'success'
-    permissions: {}
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact_name }}
-          path: /tmp
-
-      - run: docker load --input /tmp/image.tar
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - run: docker push ${{ needs.build.outputs.image_tags }}
-
-  # ═══════════════════════════════════════════════════════════════════
-  # PROMOTE: Update k8s deployment in Coflnet/k8s after push.
-  # Equivalent to the Argo promoter: edits YAML, commits, opens PR.
-  # ═══════════════════════════════════════════════════════════════════
-  promote:
-    name: Promote
-    runs-on: ubuntu-latest
-    needs: [push]
-    if: inputs.k8s_file != ''
-    permissions:
-      contents: write
-      pull-requests: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: Coflnet/k8s
-          token: ${{ secrets.K8S_PAT }}
-          path: k8s
-
-      - name: Update image tag
-        working-directory: k8s
+      - name: Derive Docker Hub image name
+        id: image
         run: |
-          FILE="${{ inputs.k8s_file }}"
-          KEY="${{ inputs.k8s_image_key }}"
-          TAG="${{ github.sha }}"
+          REPO_LOWER="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
+          echo "name=muehlhansfl/${REPO_LOWER}" >> "$GITHUB_OUTPUT"
 
-          if [ ! -f "$FILE" ]; then
-            echo "::error::Deployment file not found: $FILE"
-            exit 1
-          fi
-
-          echo "Before:"
-          grep -A2 'image:' "$FILE" | head -5
-
-          yq eval ".${KEY} = \"${TAG}\"" -i "$FILE"
-
-          echo "After:"
-          grep -A2 'image:' "$FILE" | head -5
-
-      - uses: peter-evans/create-pull-request@v7
+      - name: Request OIDC token from GitHub
+        id: token
+        uses: actions/github-script@v7
         with:
-          path: k8s
-          commit-message: "chore(${{ github.event.repository.name }}): deploy ${{ github.sha }}"
-          branch: "promote/${{ github.event.repository.name }}-${{ github.sha }}"
-          title: "🚀 Deploy ${{ github.event.repository.name }} @ ${{ github.sha }}"
-          body: |
-            Automated promotion after successful build + scan.
+          script: |
+            const token = await core.getIDToken("https://argo-promote.coflnet.com");
+            core.setOutput("id_token", token);
 
-            - **Image**: `${{ needs.build.outputs.image_tags }}`
-            - **Source**: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
-            - **Workflow**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          delete-branch: true
+      - name: Send promotion webhook to Argo Events
+        run: |
+          # Build the webhook payload. The `token` is the OIDC JWT that
+          # Argo will verify against GitHub's JWKS. The `repository` and
+          # `sha` fields are cross-checked against verified JWT claims.
+          PAYLOAD="$(jq -nc \
+            --arg token "${{ steps.token.outputs.id_token }}" \
+            --arg repository "${{ github.repository }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg image_name "${{ steps.image.outputs.name }}" \
+            --arg ghcr_image "${{ needs.build.outputs.ghcr_image }}" \
+            --arg ghcr_tag "${{ needs.build.outputs.ghcr_tag_sha }}" \
+            --arg k8s_file "${{ inputs.k8s_file }}" \
+            --arg k8s_image_key "${{ inputs.k8s_image_key }}" \
+            --arg branch "${{ inputs.branch_tag || github.ref_name }}" \
+            '{
+              token: $token,
+              repository: $repository,
+              sha: $sha,
+              image_name: $image_name,
+              ghcr_image: $ghcr_image,
+              ghcr_tag: $ghcr_tag,
+              k8s_file: $k8s_file,
+              k8s_image_key: $k8s_image_key,
+              branch: $branch
+            }')"
+
+          echo "::notice::Signaling Argo for ${REPO_LOWER} @ ${{ github.sha }}"
+
+          curl -fsS -X POST \
+            "https://argo-events.coflnet.com/github-promote" \
+            -H "Authorization: Bearer ${{ steps.token.outputs.id_token }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"

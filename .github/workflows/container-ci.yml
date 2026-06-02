@@ -2,9 +2,12 @@
 # Reusable workflow: Build → Scan → Push → Promote
 # Location: Coflnet/.github/.github/workflows/container-ci.yml
 #
-# SECURITY: This file lives in a protected repo. Contributors to other
-# repos CANNOT modify it. The image name is derived from the repo name
-# — callers cannot redirect builds to a different image.
+# SECURITY:
+# - This file lives in a protected repo. Callers cannot modify it.
+# - Image name is derived from repo name, MUST use muehlhansfl/ namespace.
+# - Registry credentials are stored in THIS repo only — callers never
+#   pass them. A compromised caller repo cannot exfiltrate tokens.
+# - Scan gates push: no push if Trivy finds HIGH+ CVEs.
 # ═══════════════════════════════════════════════════════════════════════
 
 name: Container CI
@@ -12,46 +15,30 @@ name: Container CI
 on:
   workflow_call:
     inputs:
-      # ── Optional build configuration ──
       dockerfile:
         type: string
         default: "./Dockerfile"
-        description: "Path to Dockerfile relative to repo root"
       context:
         type: string
         default: "."
-        description: "Docker build context path"
       platforms:
         type: string
         default: "linux/amd64"
-        description: "Target platforms (comma-separated)"
       severity_threshold:
         type: string
         default: "HIGH"
-        description: "Trivy severity threshold (LOW, MEDIUM, HIGH, CRITICAL)"
-      # ── Optional: promotion (fleet deployment update) ──
-      fleet_repo:
+      k8s_file:
         type: string
         default: ""
-        description: "If set, update image tag in this Fleet repo (org/repo)"
-      fleet_path:
-        type: string
-        default: ""
-        description: "Path within fleet repo to update (e.g. sky/sky-main.yaml)"
-      fleet_image_key:
+        description: "Path in Coflnet/k8s to update (e.g. main/sky/chart/charts/sky-proxy/values.yaml)"
+      k8s_image_key:
         type: string
         default: "image.tag"
-        description: "YAML key path to update (dot-separated, e.g. image.tag)"
-    secrets:
-      ghcr_username:
-        required: true
-        description: "GitHub Container Registry username"
-      ghcr_token:
-        required: true
-        description: "GitHub Container Registry token (PAT with write:packages)"
-      fleet_pat:
-        required: false
-        description: "PAT for Fleet repo access (only needed if fleet_repo is set)"
+        description: "YAML key path to update"
+
+# NOTE: No 'secrets:' declared. Registry credentials live in
+# THIS repo (Coflnet/.github → Settings → Secrets).
+# Caller workflows CANNOT access them.
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════
@@ -77,13 +64,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Derive image name from repo
+      - name: Derive image name
         id: image
         run: |
-          # SECURITY: image name is DERIVED, not configurable by caller.
-          # A compromised contributor cannot redirect builds to another image.
-          REPO_LOWER="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
-          echo "name=ghcr.io/${REPO_LOWER}" >> "$GITHUB_OUTPUT"
+          # SECURITY: image name is DERIVED. Caller cannot override.
+          # Must use muehlhansfl/ namespace — same as Argo template check.
+          REPO_LOWER="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
+          echo "name=docker.io/muehlhansfl/${REPO_LOWER}" >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata
         id: meta
@@ -163,89 +150,81 @@ jobs:
           sarif_file: ${{ steps.scan.outputs.sarif }}
 
   # ═══════════════════════════════════════════════════════════════════
-  # PUSH: Only runs if scan passed. Registry credentials live here.
+  # PUSH: Docker Hub. Only if scan passed. Credentials live in
+  # Coflnet/.github repo secrets — callers NEVER see them.
   # ═══════════════════════════════════════════════════════════════════
   push:
-    name: Push
+    name: Push to Docker Hub
     runs-on: ubuntu-latest
     needs: [build, scan]
     if: needs.scan.result == 'success'
-    # Optional: require manual approval before push
-    # environment: registry-push
-    permissions: {}  # no extra permissions needed
+    permissions: {}
 
     steps:
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build.outputs.artifact_name }}
           path: /tmp
 
-      - name: Load image
-        run: docker load --input /tmp/image.tar
+      - run: docker load --input /tmp/image.tar
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ secrets.ghcr_username }}
-          password: ${{ secrets.ghcr_token }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Push image
-        run: |
-          docker push ${{ needs.build.outputs.image_tags }}
+      - run: docker push ${{ needs.build.outputs.image_tags }}
 
   # ═══════════════════════════════════════════════════════════════════
-  # PROMOTE: Optional — update Fleet deployment after successful push.
-  # Only runs if fleet_repo input is provided.
+  # PROMOTE: Update k8s deployment in Coflnet/k8s after push.
+  # Equivalent to the Argo promoter: edits YAML, commits, opens PR.
   # ═══════════════════════════════════════════════════════════════════
   promote:
     name: Promote
     runs-on: ubuntu-latest
     needs: [push]
-    if: inputs.fleet_repo != '' && inputs.fleet_path != ''
+    if: inputs.k8s_file != ''
     permissions:
       contents: write
       pull-requests: write
 
     steps:
-      - name: Checkout Fleet repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.fleet_repo }}
-          token: ${{ secrets.fleet_pat }}
-          path: fleet
+          repository: Coflnet/k8s
+          token: ${{ secrets.K8S_PAT }}
+          path: k8s
 
       - name: Update image tag
-        id: update
-        working-directory: fleet
+        working-directory: k8s
         run: |
-          FILE="${{ inputs.fleet_path }}"
-          KEY="${{ inputs.fleet_image_key }}"
+          FILE="${{ inputs.k8s_file }}"
+          KEY="${{ inputs.k8s_image_key }}"
           TAG="${{ github.sha }}"
 
           if [ ! -f "$FILE" ]; then
-            echo "::error::Fleet file not found: $FILE"
+            echo "::error::Deployment file not found: $FILE"
             exit 1
           fi
 
-          # Update the image tag using yq (installed on ubuntu-latest)
+          echo "Before:"
+          grep -A2 'image:' "$FILE" | head -5
+
           yq eval ".${KEY} = \"${TAG}\"" -i "$FILE"
 
-          echo "Updated ${KEY} to ${TAG} in ${FILE}"
-          cat "$FILE"
+          echo "After:"
+          grep -A2 'image:' "$FILE" | head -5
 
-      - name: Create promotion PR
-        uses: peter-evans/create-pull-request@v7
+      - uses: peter-evans/create-pull-request@v7
         with:
-          path: fleet
-          commit-message: "chore(${{ github.event.repository.name }}): deploy image ${{ github.sha }}"
+          path: k8s
+          commit-message: "chore(${{ github.event.repository.name }}): deploy ${{ github.sha }}"
           branch: "promote/${{ github.event.repository.name }}-${{ github.sha }}"
           title: "🚀 Deploy ${{ github.event.repository.name }} @ ${{ github.sha }}"
           body: |
             Automated promotion after successful build + scan.
 
             - **Image**: `${{ needs.build.outputs.image_tags }}`
-            - **Commit**: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+            - **Source**: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
             - **Workflow**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           delete-branch: true

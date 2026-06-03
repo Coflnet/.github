@@ -46,6 +46,10 @@ on:
         type: string
         default: "image.tag"
         description: "YAML key path to update (for the Argo promoter)"
+      repo_url:
+        type: string
+        default: "https://github.com/Coflnet/fleet"
+        description: "Git repo for the promoter to update (MUST be Coflnet/k8s or Coflnet/fleet)"
       # ── Optional: override the default branch tag ──
       branch_tag:
         type: string
@@ -165,6 +169,13 @@ jobs:
 
       - name: Send promotion webhook to Argo Events
         run: |
+          # SECURITY: repo_url MUST be one of the two allowed promotion targets.
+          # This prevents a compromised caller repo from redirecting promotions
+          # to an arbitrary Coflnet repository.
+          case "${{ inputs.repo_url }}" in
+            https://github.com/Coflnet/k8s|https://github.com/Coflnet/fleet) ;;
+            *) echo "::error::repo_url must be Coflnet/k8s or Coflnet/fleet, got: ${{ inputs.repo_url }}"; exit 1 ;;
+          esac
           # Build the webhook payload. The `token` is the OIDC JWT that
           # Argo will verify against GitHub's JWKS. The `repository` and
           # `sha` fields are cross-checked against verified JWT claims.
@@ -177,6 +188,7 @@ jobs:
             --arg ghcr_tag "${{ needs.build.outputs.ghcr_tag_sha }}" \
             --arg k8s_file "${{ inputs.k8s_file }}" \
             --arg k8s_image_key "${{ inputs.k8s_image_key }}" \
+            --arg repo_url "${{ inputs.repo_url }}" \
             --arg branch "${{ inputs.branch_tag || github.ref_name }}" \
             '{
               token: $token,
@@ -187,6 +199,7 @@ jobs:
               ghcr_tag: $ghcr_tag,
               k8s_file: $k8s_file,
               k8s_image_key: $k8s_image_key,
+              repo_url: $repo_url,
               branch: $branch
             }')"
 

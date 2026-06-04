@@ -45,15 +45,15 @@ on:
       k8s_file:
         type: string
         default: ""
-        description: "Path in Coflnet/fleet to update (e.g. sky/chart/charts/sky-proxy/values.yaml)"
+        description: "Path in Coflnet/k8s to update (e.g. main/sky/chart/charts/sky-proxy/values.yaml). Empty = skip promotion."
       k8s_image_key:
         type: string
         default: "image.tag"
-        description: "YAML key path to update (for the Argo promoter)"
+        description: "YAML key path to update"
       repo_url:
         type: string
-        default: "https://github.com/Coflnet/fleet"
-        description: "Git repo for the promoter to update (MUST be Coflnet/k8s or Coflnet/fleet)"
+        default: "https://github.com/Coflnet/k8s"
+        description: "GitOps repo to update — almost always Coflnet/k8s"
       # ── Optional: override the default branch tag ──
       branch_tag:
         type: string

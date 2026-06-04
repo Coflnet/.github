@@ -52,8 +52,8 @@ on:
         description: "YAML key path to update"
       repo_url:
         type: string
-        default: "https://github.com/Coflnet/k8s"
-        description: "GitOps repo to update — almost always Coflnet/k8s"
+        default: "https://github.com/Coflnet/fleet"
+        description: "GitOps repo where tag is committed — Coflnet/fleet or Coflnet/k8s"
       # ── Optional: override the default branch tag ──
       branch_tag:
         type: string

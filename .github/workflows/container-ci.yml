@@ -221,3 +221,57 @@ jobs:
             -H "X-Hub-Signature-256: sha256=${HMAC}" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # CLEANUP: Keep ≤2 recent images + 2-day TTL on all versions
+  # ═══════════════════════════════════════════════════════════════════
+  cleanup:
+    name: Expire old GHCR images
+    runs-on: ubuntu-latest
+    needs: [build, signal]
+    if: always() && needs.build.result != 'skipped'
+    permissions:
+      packages: write
+
+    steps:
+      - name: Delete stale GHCR versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_TAG: ${{ needs.build.outputs.ghcr_tag_branch }}
+        run: |
+          REPO_LOWER="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          OWNER="${REPO_LOWER%%/*}"
+          PACKAGE="${REPO_LOWER##*/}"
+          CUTOFF="$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+
+          echo "::notice::Cleaning ghcr.io/${REPO_LOWER}"
+          echo "::notice::  TTL cutoff:  ${CUTOFF}"
+          echo "::notice::  Cap:         at most 2 recent versions + live branch tag (${BRANCH_TAG})"
+
+          # Fetch versions; gracefully skip if the package doesn't exist yet.
+          VERSIONS_JSON="$(gh api -H "Accept: application/vnd.github+json" \
+            "/orgs/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" 2>/dev/null || echo '[]')"
+
+          # Selection logic (jq):
+          #   1. Sort by created_at descending (newest first).
+          #   2. A version is DELETED when BOTH are true:
+          #      a) It does NOT carry the current branch tag (live pointer).
+          #      b) It is EITHER older than the 2-day cutoff OR ranked 3+.
+          #   3. Net effect: ≤2 recent images survive + everything expires
+          #      after 2 days regardless of rank.
+          echo "${VERSIONS_JSON}" | jq -r --arg cutoff "${CUTOFF}" --arg branch "${BRANCH_TAG}" \
+            'sort_by(.created_at) | reverse | to_entries
+             | map(select(
+                 (.value.metadata.container.tags | index($branch) == null)
+                 and
+                 (.value.created_at < $cutoff or .key >= 2)
+               ))
+             | .[] | "\(.value.id) \(.value.metadata.container.tags | join(","))"' \
+            | while read -r VID TAGS; do
+              echo "::warning::Expiring version ${VID} (tags: ${TAGS:-untagged})"
+              gh api --silent -X DELETE \
+                -H "Accept: application/vnd.github+json" \
+                "/orgs/${OWNER}/packages/container/${PACKAGE}/versions/${VID}" || true
+            done
+
+          echo "::notice::GHCR cleanup complete"

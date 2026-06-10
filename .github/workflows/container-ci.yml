@@ -246,27 +246,29 @@ jobs:
 
           echo "::notice::Cleaning ghcr.io/${REPO_LOWER}"
           echo "::notice::  TTL cutoff:  ${CUTOFF}"
-          echo "::notice::  Cap:         at most 2 recent versions + live branch tag (${BRANCH_TAG})"
+          echo "::notice::  Policy:      keep branch-tagged version; delete everything else older than cutoff"
 
           # Fetch versions; gracefully skip if the package doesn't exist yet.
           VERSIONS_JSON="$(gh api -H "Accept: application/vnd.github+json" \
             "/orgs/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" 2>/dev/null || echo '[]')"
 
           # Selection logic (jq):
-          #   1. Sort by created_at descending (newest first).
-          #   2. A version is DELETED when BOTH are true:
-          #      a) It does NOT carry the current branch tag (live pointer).
-          #      b) It is EITHER older than the 2-day cutoff OR ranked 3+.
-          #   3. Net effect: ≤2 recent images survive + everything expires
-          #      after 2 days regardless of rank.
+          #   A version is DELETED when BOTH are true:
+          #     a) It does NOT carry the current branch tag (live pointer).
+          #     b) It is older than the 2-day TTL cutoff.
+          #   Rank-based capping is deliberately NOT used here — untagged
+          #   platform manifests (children of a tagged manifest list) must
+          #   survive alongside their parent or the image breaks.
+          #   Relying purely on the TTL gives every version ≥2 days of life,
+          #   which is ample for the Argo promotion pipeline.
           echo "${VERSIONS_JSON}" | jq -r --arg cutoff "${CUTOFF}" --arg branch "${BRANCH_TAG}" \
-            'sort_by(.created_at) | reverse | to_entries
+            'sort_by(.created_at) | reverse
              | map(select(
-                 (.value.metadata.container.tags | index($branch) == null)
+                 (.metadata.container.tags | index($branch) == null)
                  and
-                 (.value.created_at < $cutoff or .key >= 2)
+                 (.created_at < $cutoff)
                ))
-             | .[] | "\(.value.id) \(.value.metadata.container.tags | join(","))"' \
+             | .[] | "\(.id) \(.metadata.container.tags | join(","))"' \
             | while read -r VID TAGS; do
               echo "::warning::Expiring version ${VID} (tags: ${TAGS:-untagged})"
               gh api --silent -X DELETE \

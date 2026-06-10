@@ -242,7 +242,7 @@ jobs:
           REPO_LOWER="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           OWNER="${REPO_LOWER%%/*}"
           PACKAGE="${REPO_LOWER##*/}"
-          CUTOFF="$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          CUTOFF="$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
 
           echo "::notice::Cleaning ghcr.io/${REPO_LOWER}"
           echo "::notice::  TTL cutoff:  ${CUTOFF}"

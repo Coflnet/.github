@@ -145,7 +145,7 @@ jobs:
             NUXT_UI_PRO_LICENSE=${{ secrets.NUXT_UI_PRO_LICENSE }}
             HF_TOKEN=${{ secrets.HF_TOKEN }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
   # ═══════════════════════════════════════════════════════════════════
   # SIGNAL: Request OIDC JWT and webhook Argo Events

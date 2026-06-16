@@ -15,6 +15,9 @@
 # 5. Trivy scan runs INSIDE the cluster (authoritative gate) before
 #    the image is promoted to Docker Hub. No Docker Hub creds exist
 #    on GitHub runners.
+# 6. Optional pre-push Trivy scan on GitHub runners (scan_with_trivy: true)
+#    catches library CVEs before the image reaches GHCR — faster feedback
+#    for developers. Cluster-side scan remains the authoritative gate.
 #
 # SECRETS: Build-time secrets (NuGet, HuggingFace, Nuxt license) are
 # stored as ORGANIZATION secrets in the Coflnet org. Caller workflows
@@ -59,6 +62,11 @@ on:
         type: string
         default: ""
         description: "Branch name for GHCR tag (defaults to github.ref_name)"
+      # ── Optional: Trivy scan before push ──
+      scan_with_trivy:
+        type: boolean
+        default: false
+        description: "Run Trivy vulnerability scan on the built image before pushing to GHCR. Requires single-platform build (platforms: linux/amd64)."
 
 # Build-time credentials (NuGet, HF, Nuxt) are Coflnet org secrets.
 # ARGO_WEBHOOK_SECRET is HMAC shared with Argo Events — public repos
@@ -69,6 +77,7 @@ permissions:
   id-token: write   # Required for core.getIDToken() → OIDC JWT
   packages: write   # Required for docker push to ghcr.io
   contents: read    # Required for actions/checkout
+  security-events: write  # Required for SARIF upload (when scan_with_trivy: true)
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════
@@ -128,13 +137,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push to GHCR
+      - name: Build Docker image
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
           file: /tmp/ci-dockerfile/Dockerfile
           platforms: ${{ inputs.platforms }}
-          push: true
+          push: ${{ !inputs.scan_with_trivy }}
+          load: ${{ inputs.scan_with_trivy }}
           tags: |
             ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_sha }}
             ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_branch }}
@@ -146,6 +156,31 @@ jobs:
             HF_TOKEN=${{ secrets.HF_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=min,ignore-error=true
+
+      - name: Run Trivy vulnerability scanner
+        if: ${{ inputs.scan_with_trivy }}
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'HIGH,CRITICAL'
+          vuln-type: 'library'
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: ${{ inputs.scan_with_trivy && always() }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: trivy-scan
+
+      - name: Push scanned image to GHCR
+        if: ${{ inputs.scan_with_trivy && success() }}
+        run: |
+          docker push ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_sha }}
+          docker push ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_branch }}
 
   # ═══════════════════════════════════════════════════════════════════
   # SIGNAL: Request OIDC JWT and webhook Argo Events

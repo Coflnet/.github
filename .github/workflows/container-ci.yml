@@ -258,7 +258,7 @@ jobs:
             -d "$PAYLOAD"
 
   # ═══════════════════════════════════════════════════════════════════
-  # CLEANUP: Keep ≤2 recent images + 2-day TTL on all versions
+  # CLEANUP: 2-hour TTL — protects the current branch + SHA tags
   # ═══════════════════════════════════════════════════════════════════
   cleanup:
     name: Expire old GHCR images
@@ -273,6 +273,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH_TAG: ${{ needs.build.outputs.ghcr_tag_branch }}
+          SHA_TAG: ${{ needs.build.outputs.ghcr_tag_sha }}
         run: |
           REPO_LOWER="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           OWNER="${REPO_LOWER%%/*}"
@@ -281,25 +282,31 @@ jobs:
 
           echo "::notice::Cleaning ghcr.io/${REPO_LOWER}"
           echo "::notice::  TTL cutoff:  ${CUTOFF}"
-          echo "::notice::  Policy:      keep branch-tagged version; delete everything else older than cutoff"
+          echo "::notice::  Policy:      keep branch-tagged and SHA-tagged version from this run; delete everything else older than cutoff"
 
           # Fetch versions; gracefully skip if the package doesn't exist yet.
           VERSIONS_JSON="$(gh api -H "Accept: application/vnd.github+json" \
             "/orgs/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" 2>/dev/null || echo '[]')"
 
           # Selection logic (jq):
-          #   A version is DELETED when BOTH are true:
+          #   A version is DELETED when ALL THREE are true:
           #     a) It does NOT carry the current branch tag (live pointer).
-          #     b) It is older than the 2-day TTL cutoff.
+          #     b) It does NOT carry the current SHA tag (the version Argo
+          #        was just signaled to promote — critical for cross-run
+          #        safety when a subsequent run has already moved the
+          #        branch tag to a newer commit).
+          #     c) It is older than the 2-hour TTL cutoff.
           #   Rank-based capping is deliberately NOT used here — untagged
           #   platform manifests (children of a tagged manifest list) must
           #   survive alongside their parent or the image breaks.
-          #   Relying purely on the TTL gives every version ≥2 days of life,
+          #   Relying purely on the TTL gives every version ≥2 hours of life,
           #   which is ample for the Argo promotion pipeline.
-          echo "${VERSIONS_JSON}" | jq -r --arg cutoff "${CUTOFF}" --arg branch "${BRANCH_TAG}" \
+          echo "${VERSIONS_JSON}" | jq -r --arg cutoff "${CUTOFF}" --arg branch "${BRANCH_TAG}" --arg sha_tag "${SHA_TAG}" \
             'sort_by(.created_at) | reverse
              | map(select(
                  (.metadata.container.tags | index($branch) == null)
+                 and
+                 (.metadata.container.tags | index($sha_tag) == null)
                  and
                  (.created_at < $cutoff)
                ))

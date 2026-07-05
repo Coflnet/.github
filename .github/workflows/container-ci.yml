@@ -93,10 +93,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Derive image name and tags
         id: ghcr-tag
@@ -131,14 +131,14 @@ jobs:
           echo "::notice::Injected NODE_USE_ENV_PROXY after FROM lines"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ inputs.context }}
           file: /tmp/ci-dockerfile/Dockerfile
@@ -201,7 +201,7 @@ jobs:
 
       - name: Request OIDC token from GitHub
         id: token
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const token = await core.getIDToken("https://argo-promote.coflnet.com");

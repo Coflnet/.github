@@ -150,6 +150,7 @@ jobs:
             ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_branch }}
           build-args: |
             NODE_USE_ENV_PROXY=1
+            APP_VERSION=${{ github.sha }}
             NUGET_USERNAME=${{ secrets.NUGET_USERNAME }}
             NUGET_PASSWORD=${{ secrets.NUGET_PASSWORD }}
             NUXT_UI_PRO_LICENSE=${{ secrets.NUXT_UI_PRO_LICENSE }}

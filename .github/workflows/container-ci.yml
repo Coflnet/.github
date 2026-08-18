@@ -32,7 +32,7 @@ on:
     secrets:
       ARGO_WEBHOOK_SECRET:
         required: true
-        description: "HMAC secret shared with Argo Events for webhook validation"
+        description: "Bearer token shared with Argo Events for webhook authentication"
     inputs:
       dockerfile:
         type: string
@@ -69,7 +69,7 @@ on:
         description: "Run Trivy vulnerability scan on the built image before pushing to GHCR. Requires single-platform build (platforms: linux/amd64)."
 
 # Build-time credentials (NuGet, HF, Nuxt) are Coflnet org secrets.
-# ARGO_WEBHOOK_SECRET is HMAC shared with Argo Events — public repos
+# ARGO_WEBHOOK_SECRET is a bearer token shared with Argo Events — public repos
 # get it via org secret, private repos pass it explicitly.
 # Docker Hub credentials NEVER touch GitHub runners.
 
@@ -246,15 +246,11 @@ jobs:
               branch: $branch
             }')"
 
-          # Compute HMAC-SHA256 signature — Argo Events validates this
-          # against the shared webhook secret before creating any workflow.
-          HMAC="$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$ARGO_WEBHOOK_SECRET" | sed 's/^.* //')"
+          echo "::notice::Signaling Argo for ${{ github.repository }} @ ${{ github.sha }}"
 
-          echo "::notice::Signaling Argo for ${REPO_LOWER} @ ${{ github.sha }}"
-
-          curl -fsS -X POST \
+          curl --fail --silent --show-error -X POST \
             "https://argo-events.coflnet.com/github-promote" \
-            -H "X-Hub-Signature-256: sha256=${HMAC}" \
+            -H "Authorization: Bearer ${ARGO_WEBHOOK_SECRET}" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"
 

@@ -248,12 +248,14 @@ jobs:
         env:
           ARGO_WEBHOOK_SECRET: ${{ secrets.ARGO_WEBHOOK_SECRET }}
         run: |
-          # SECURITY: repo_url MUST be one of the two allowed promotion targets.
-          # This prevents a compromised caller repo from redirecting promotions
-          # to an arbitrary Coflnet repository.
+          # SECURITY: repo_url MUST resolve to one of the two allowed promotion
+          # targets. This prevents a compromised caller repo from redirecting
+          # promotions to an arbitrary Coflnet repository. Accept either the full
+          # GitHub URL or the "owner/repo" short form, and normalize to the URL.
           case "${{ inputs.repo_url }}" in
-            https://github.com/Coflnet/k8s|https://github.com/Coflnet/fleet) ;;
-            *) echo "::error::repo_url must be Coflnet/k8s or Coflnet/fleet, got: ${{ inputs.repo_url }}"; exit 1 ;;
+            https://github.com/Coflnet/k8s|Coflnet/k8s)     REPO_URL="https://github.com/Coflnet/k8s" ;;
+            https://github.com/Coflnet/fleet|Coflnet/fleet) REPO_URL="https://github.com/Coflnet/fleet" ;;
+            *) echo "::error::repo_url must be one of: https://github.com/Coflnet/k8s or https://github.com/Coflnet/fleet (the Coflnet/k8s and Coflnet/fleet short forms are also accepted). Got: '${{ inputs.repo_url }}'"; exit 1 ;;
           esac
           # Build the webhook payload. The `token` is the OIDC JWT that
           # Argo will verify against GitHub's JWKS. The `repository` and
@@ -267,7 +269,7 @@ jobs:
             --arg ghcr_tag "${{ needs.build.outputs.ghcr_tag_sha }}" \
             --arg k8s_file "${{ inputs.k8s_file }}" \
             --arg k8s_image_key "${{ inputs.k8s_image_key }}" \
-            --arg repo_url "${{ inputs.repo_url }}" \
+            --arg repo_url "$REPO_URL" \
             --arg branch "${{ inputs.branch_tag || github.ref_name }}" \
             '{
               token: $token,

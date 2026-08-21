@@ -2,7 +2,12 @@
 
 ## Container CI (`container-ci.yml`)
 
-Reusable workflow: **Build on GitHub → Push to GHCR → Signal Argo via OIDC webhook**
+Reusable workflow: **test pull requests; build, push, and deploy merged branches**
+
+Pull requests are side-effect-free: they do not log in to GHCR, push images,
+run the registry scan, signal Argo, or clean registry tags. If the Dockerfile
+has a stage named `test`, only that stage is built. Repositories without one
+temporarily retain a no-push full-build fallback.
 
 ### Architecture
 
@@ -36,6 +41,7 @@ Create `.github/workflows/ci.yml` in your repo:
 name: CI
 
 on:
+  pull_request:
   push:
     branches: [main, release, develop, preprod]
 
@@ -55,6 +61,20 @@ jobs:
       # Optional: path in fleet repo to update on promotion
       k8s_file: sky/chart/charts/sky-proxy/values.yaml
 ```
+
+For a fast pull-request gate, make the test stage explicit and let the final
+image continue from it:
+
+```dockerfile
+FROM build AS test
+RUN dotnet test
+
+FROM test AS publish
+RUN dotnet publish --no-restore -o /app
+```
+
+On pull requests the shared workflow stops at `test`. On a merge/push it builds
+the final image; a failing test therefore prevents the image push and deployment.
 
 ### Required secrets
 

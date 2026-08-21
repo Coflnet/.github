@@ -1,21 +1,24 @@
 # ═══════════════════════════════════════════════════════════════════════
-# Reusable workflow: Build → Push to GHCR → Signal Argo via OIDC webhook
+# Reusable workflow: PR test, or Build → Push to GHCR → Signal Argo
 # Location: Coflnet/.github/.github/workflows/container-ci.yml
 #
 # SECURITY MODEL (defense in depth):
-# 1. Build runs on GitHub's ephemeral runners — NO cluster access.
-# 2. Image pushed to ghcr.io/coflnet/<repo> — private by default,
+# 1. Tests/builds run on GitHub's ephemeral runners — NO cluster access.
+# 2. Pull requests never push an image or signal deployment. A Dockerfile
+#    stage named `test` is selected when present; otherwise the final image is
+#    built without being loaded or pushed for backward compatibility.
+# 3. Images from non-PR runs are pushed to ghcr.io/coflnet/<repo> — private by default,
 #    readable only by the cluster's ghcr-read token (OpenBao).
-# 3. GitHub mints a cryptographically signed OIDC JWT (RS256) and
+# 4. GitHub mints a cryptographically signed OIDC JWT (RS256) and
 #    POSTs it to Argo Events. An attacker cannot forge the JWT
 #    because they don't have GitHub's private signing key.
-# 4. Argo verifies the JWT against GitHub's JWKS, extracts the
+# 5. Argo verifies the JWT against GitHub's JWKS, extracts the
 #    authenticated `repository` claim, and cross-checks it against
 #    the pull request. The webhook body is NOT trusted alone.
-# 5. Trivy scan runs INSIDE the cluster (authoritative gate) before
+# 6. Trivy scan runs INSIDE the cluster (authoritative gate) before
 #    the image is promoted to Docker Hub. No Docker Hub creds exist
 #    on GitHub runners.
-# 6. Optional pre-push Trivy scan on GitHub runners (scan_with_trivy: true)
+# 7. Optional pre-push Trivy scan on GitHub runners (scan_with_trivy: true)
 #    catches library CVEs before the image reaches GHCR — faster feedback
 #    for developers. Cluster-side scan remains the authoritative gate.
 #
@@ -33,6 +36,18 @@ on:
       ARGO_WEBHOOK_SECRET:
         required: true
         description: "Bearer token shared with Argo Events for webhook authentication"
+      NUGET_USERNAME:
+        required: false
+        description: "Optional private NuGet feed username"
+      NUGET_PASSWORD:
+        required: false
+        description: "Optional private NuGet feed password"
+      NUXT_UI_PRO_LICENSE:
+        required: false
+        description: "Optional Nuxt UI Pro license"
+      HF_TOKEN:
+        required: false
+        description: "Optional HuggingFace access token"
     inputs:
       dockerfile:
         type: string
@@ -81,10 +96,10 @@ permissions:
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════
-  # BUILD & PUSH to GHCR
+  # PR TEST, or BUILD & PUSH to GHCR
   # ═══════════════════════════════════════════════════════════════════
   build:
-    name: Build & Push GHCR
+    name: ${{ github.event_name == 'pull_request' && 'Test' || 'Build & Push GHCR' }}
     runs-on: ubuntu-latest
     outputs:
       ghcr_image: ${{ steps.ghcr-tag.outputs.image }}
@@ -105,13 +120,31 @@ jobs:
           REPO_LOWER="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           IMAGE="ghcr.io/${REPO_LOWER}"
           TAG_SHA="${{ github.sha }}"
-          TAG_BRANCH="${{ inputs.branch_tag || github.ref_name }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            TAG_BRANCH="pr-${{ github.event.pull_request.number }}"
+          else
+            TAG_BRANCH="${{ inputs.branch_tag || github.ref_name }}"
+          fi
 
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           echo "tag_sha=${TAG_SHA}" >> "$GITHUB_OUTPUT"
           echo "tag_branch=${TAG_BRANCH}" >> "$GITHUB_OUTPUT"
 
           echo "::notice::Building ${IMAGE}:${TAG_SHA} (branch: ${TAG_BRANCH})"
+
+      - name: Select pull request test target
+        id: build-target
+        shell: bash
+        run: |
+          TARGET=""
+          if [ "${{ github.event_name }}" = "pull_request" ] \
+            && grep -Eiq '^[[:space:]]*FROM[[:space:]].*[[:space:]]AS[[:space:]]+test([[:space:]]|$)' "${{ inputs.dockerfile }}"; then
+            TARGET="test"
+            echo "::notice::Pull request selects the Dockerfile test stage"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "::warning::Dockerfile has no test stage; building the final stage without pushing"
+          fi
+          echo "target=${TARGET}" >> "$GITHUB_OUTPUT"
 
       - name: Inject NODE_USE_ENV_PROXY into Dockerfile
         run: |
@@ -131,6 +164,7 @@ jobs:
           echo "::notice::Injected NODE_USE_ENV_PROXY after FROM lines"
 
       - name: Log in to GHCR
+        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -143,8 +177,9 @@ jobs:
           context: ${{ inputs.context }}
           file: /tmp/ci-dockerfile/Dockerfile
           platforms: ${{ inputs.platforms }}
-          push: ${{ !inputs.scan_with_trivy }}
-          load: ${{ inputs.scan_with_trivy }}
+          target: ${{ steps.build-target.outputs.target }}
+          push: ${{ github.event_name != 'pull_request' && !inputs.scan_with_trivy }}
+          load: ${{ github.event_name != 'pull_request' && inputs.scan_with_trivy }}
           tags: |
             ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_sha }}
             ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_branch }}
@@ -159,7 +194,7 @@ jobs:
           cache-to: type=gha,mode=min,ignore-error=true
 
       - name: Run Trivy vulnerability scanner
-        if: ${{ inputs.scan_with_trivy }}
+        if: ${{ github.event_name != 'pull_request' && inputs.scan_with_trivy }}
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_sha }}
@@ -171,14 +206,14 @@ jobs:
           exit-code: 1
 
       - name: Upload Trivy scan results to GitHub Security tab
-        if: ${{ inputs.scan_with_trivy && always() }}
+        if: ${{ github.event_name != 'pull_request' && inputs.scan_with_trivy && always() }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
           category: trivy-scan
 
       - name: Push scanned image to GHCR
-        if: ${{ inputs.scan_with_trivy && success() }}
+        if: ${{ github.event_name != 'pull_request' && inputs.scan_with_trivy && success() }}
         run: |
           docker push ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_sha }}
           docker push ${{ steps.ghcr-tag.outputs.image }}:${{ steps.ghcr-tag.outputs.tag_branch }}
@@ -190,6 +225,7 @@ jobs:
     name: Signal Argo
     runs-on: ubuntu-latest
     needs: build
+    if: ${{ github.event_name != 'pull_request' }}
     permissions:
       id-token: write   # needed for core.getIDToken()
 
@@ -261,7 +297,7 @@ jobs:
     name: Expire old GHCR images
     runs-on: ubuntu-latest
     needs: [build, signal]
-    if: always() && needs.build.result != 'skipped'
+    if: ${{ github.event_name != 'pull_request' && always() && needs.build.result != 'skipped' }}
     permissions:
       packages: write
 

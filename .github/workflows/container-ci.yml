@@ -304,6 +304,13 @@ jobs:
       packages: write
 
     steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Delete stale GHCR versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -319,6 +326,21 @@ jobs:
           echo "::notice::  TTL cutoff:  ${CUTOFF}"
           echo "::notice::  Policy:      keep branch-tagged and SHA-tagged version from this run; delete everything else older than cutoff"
 
+          # Platform and attestation manifests are untagged versions of their own. A
+          # build that produces a layer-identical platform image reuses the existing
+          # version, which keeps its original created_at, so the TTL alone would delete
+          # a manifest the fresh tag still points to. Keep every child of the tags
+          # protected below; if one cannot be read, skip cleanup rather than guess.
+          KEEP='[]'
+          for TAG in "${SHA_TAG}" "${BRANCH_TAG}"; do
+            [ -n "${TAG}" ] || continue
+            if ! RAW="$(docker buildx imagetools inspect --raw "ghcr.io/${REPO_LOWER}:${TAG}" 2>/dev/null)"; then
+              echo "::warning::Cannot read ghcr.io/${REPO_LOWER}:${TAG}; skipping cleanup"
+              exit 0
+            fi
+            KEEP="$(echo "${RAW}" | jq -c --argjson keep "${KEEP}" '$keep + [.manifests[]?.digest]')"
+          done
+
           # Fetch versions; gracefully skip if the package doesn't exist yet.
           VERSIONS_JSON="$(gh api -H "Accept: application/vnd.github+json" \
             "/orgs/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" 2>/dev/null || echo '[]')"
@@ -330,18 +352,21 @@ jobs:
           #        was just signaled to promote — critical for cross-run
           #        safety when a subsequent run has already moved the
           #        branch tag to a newer commit).
-          #     c) It is older than the 2-hour TTL cutoff.
+          #     c) It is not a platform or attestation manifest of (a) or (b).
+          #     d) It is older than the 2-hour TTL cutoff.
           #   Rank-based capping is deliberately NOT used here — untagged
           #   platform manifests (children of a tagged manifest list) must
           #   survive alongside their parent or the image breaks.
           #   Relying purely on the TTL gives every version ≥2 hours of life,
           #   which is ample for the Argo promotion pipeline.
-          echo "${VERSIONS_JSON}" | jq -r --arg cutoff "${CUTOFF}" --arg branch "${BRANCH_TAG}" --arg sha_tag "${SHA_TAG}" \
+          echo "${VERSIONS_JSON}" | jq -r --arg cutoff "${CUTOFF}" --arg branch "${BRANCH_TAG}" --arg sha_tag "${SHA_TAG}" --argjson keep "${KEEP}" \
             'sort_by(.created_at) | reverse
              | map(select(
                  (.metadata.container.tags | index($branch) == null)
                  and
                  (.metadata.container.tags | index($sha_tag) == null)
+                 and
+                 (.name as $digest | $keep | index($digest) == null)
                  and
                  (.created_at < $cutoff)
                ))

@@ -86,6 +86,10 @@ on:
         type: boolean
         default: false
         description: "Run Trivy vulnerability scan on the built image before pushing to GHCR. Requires single-platform build (platforms: linux/amd64)."
+      upload_sarif:
+        type: boolean
+        default: true
+        description: "Also upload Trivy results to GitHub Security; private repos require Code Security. Scan artifacts are always retained."
 
 # Build-time credentials (NuGet, HF, Nuxt) are Coflnet org secrets.
 # ARGO_WEBHOOK_SECRET is a bearer token shared with Argo Events — public repos
@@ -215,11 +219,20 @@ jobs:
           exit-code: 1
 
       - name: Upload Trivy scan results to GitHub Security tab
-        if: ${{ github.event_name != 'pull_request' && inputs.scan_with_trivy && always() }}
+        if: ${{ github.event_name != 'pull_request' && inputs.scan_with_trivy && inputs.upload_sarif && always() }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
           category: trivy-scan
+
+      - name: Retain Trivy scan results
+        if: ${{ github.event_name != 'pull_request' && inputs.scan_with_trivy && always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-sarif
+          path: trivy-results.sarif
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Push scanned image to GHCR
         if: ${{ github.event_name != 'pull_request' && inputs.scan_with_trivy && success() }}

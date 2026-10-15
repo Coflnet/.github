@@ -29,7 +29,7 @@ GitHub Runner (ephemeral)          Cluster (trusted boundary)
 ### Why this design?
 
 - **No cluster secrets on GitHub runners**: Docker Hub credentials live only in OpenBao inside the cluster. A compromised workflow cannot exfiltrate them.
-- **Build isolation**: The build runs on GitHub's ephemeral runners — nothing on the same host as the cluster.
+- **Build isolation**: The build runs on ephemeral runners without cluster access; GitHub-hosted runners are the default.
 - **OIDC authenticity**: The JWT is signed by GitHub's private key. The cluster verifies it against `token.actions.githubusercontent.com` JWKS. A developer cannot forge the `repository` claim.
 - **Authoritative Trivy scan**: The cluster runs Trivy against the exact image before it reaches Docker Hub — the scan cannot be skipped or tampered with.
 
@@ -75,6 +75,20 @@ RUN dotnet publish --no-restore -o /app
 
 On pull requests the shared workflow stops at `test`. On a merge/push it builds
 the final image; a failing test therefore prevents the image push and deployment.
+
+### Optional runner selection
+
+The `runner` input accepts a JSON array of labels and defaults to
+`["ubuntu-latest"]`. It applies to build, signal, and cleanup jobs; image scans
+and OIDC promotion remain unchanged.
+
+Ane callers opt in only for main-branch pushes when their repository variable
+`ANE_LOCAL_CI` is `true`, using the label
+`ane-local-${{ github.run_id }}-${{ github.run_attempt }}`. Start the isolated
+worker manager before enabling that variable. Set it to `false` or remove it to
+restore hosted runners for subsequent runs; queued runs retain their selected
+labels and must be cancelled before starting a new run. Pull requests and manual
+dispatches continue to use hosted runners.
 
 ### Required secrets
 

@@ -3,7 +3,7 @@
 # Location: Coflnet/.github/.github/workflows/container-ci.yml
 #
 # SECURITY MODEL (defense in depth):
-# 1. Tests/builds run on GitHub's ephemeral runners — NO cluster access.
+# 1. Tests/builds run on ephemeral runners — NO cluster access.
 # 2. Pull requests never push an image or signal deployment. A Dockerfile
 #    stage named `test` is selected when present; otherwise the final image is
 #    built without being loaded or pushed for backward compatibility.
@@ -49,6 +49,10 @@ on:
         required: false
         description: "Optional HuggingFace access token"
     inputs:
+      runner:
+        type: string
+        default: '["ubuntu-latest"]'
+        description: "JSON array of runner labels"
       dockerfile:
         type: string
         default: "./Dockerfile"
@@ -100,7 +104,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════
   build:
     name: ${{ github.event_name == 'pull_request' && 'Test' || 'Build & Push GHCR' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     outputs:
       ghcr_image: ${{ steps.ghcr-tag.outputs.image }}
       ghcr_tag_sha: ${{ steps.ghcr-tag.outputs.tag_sha }}
@@ -223,7 +227,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════
   signal:
     name: Signal Argo
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     needs: build
     if: ${{ github.event_name != 'pull_request' }}
     permissions:
@@ -297,7 +301,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════
   cleanup:
     name: Expire old GHCR images
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     needs: [build, signal]
     if: ${{ github.event_name != 'pull_request' && always() && needs.build.result != 'skipped' }}
     permissions:

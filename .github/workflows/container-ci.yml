@@ -105,6 +105,11 @@ jobs:
   build:
     name: ${{ github.event_name == 'pull_request' && 'Test' || 'Build & Push GHCR' }}
     runs-on: ${{ fromJSON(inputs.runner) }}
+    permissions:
+      actions: read   # Private-repository SARIF upload reads the workflow run.
+      contents: read
+      packages: write
+      security-events: write
     outputs:
       ghcr_image: ${{ steps.ghcr-tag.outputs.image }}
       ghcr_tag_sha: ${{ steps.ghcr-tag.outputs.tag_sha }}

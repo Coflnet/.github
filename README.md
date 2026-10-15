@@ -84,8 +84,9 @@ and OIDC promotion remain unchanged.
 
 Ane callers opt in only for main-branch pushes when their repository variable
 `ANE_LOCAL_CI` is `true`, using the label
-`ane-local-${{ github.run_id }}-${{ github.run_attempt }}`. Start the isolated
-worker manager before enabling that variable. Set it to `false` or remove it to
+`ane-local-${{ github.run_id }}-${{ github.run_attempt }}`. Prepare the isolated
+worker before enabling that variable, then start the manager for the resulting
+approved main-push run. Set the variable to `false` or remove it to
 restore hosted runners for subsequent runs; queued runs retain their selected
 labels and must be cancelled before starting a new run. Pull requests and manual
 dispatches continue to use hosted runners.

@@ -49,6 +49,10 @@ on:
         required: false
         description: "Optional HuggingFace access token"
     inputs:
+      build_runner:
+        type: string
+        default: ''
+        description: "Optional JSON array of runner labels for the build job only"
       runner:
         type: string
         default: '["ubuntu-latest"]'
@@ -108,7 +112,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════
   build:
     name: ${{ github.event_name == 'pull_request' && 'Test' || 'Build & Push GHCR' }}
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    runs-on: ${{ fromJSON(inputs.build_runner || inputs.runner) }}
     permissions:
       actions: read   # Private-repository SARIF upload reads the workflow run.
       contents: read

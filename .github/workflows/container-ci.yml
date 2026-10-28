@@ -4,7 +4,8 @@
 #
 # SECURITY MODEL (defense in depth):
 # 1. Without a caller override, private Coflnet builds use single-use KVM guests.
-#    Public/external builds and signal/cleanup jobs default to GitHub-hosted runners.
+#    Their signal/cleanup jobs run there too (hosted minutes are billed for private repos);
+#    public/external repos default to GitHub-hosted runners for every job.
 # 2. Pull requests never push an image or signal deployment. A Dockerfile
 #    stage named `test` is selected when present; otherwise the final image is
 #    built without being loaded or pushed for backward compatibility.
@@ -53,7 +54,7 @@ on:
       runner:
         type: string
         default: ''
-        description: "Optional JSON array overriding runner defaults; build defaults to coflnet-devserver for private Coflnet repos, signal/cleanup to ubuntu-latest"
+        description: "Optional JSON array overriding runner defaults; every job defaults to coflnet-devserver for private Coflnet repos, ubuntu-latest otherwise"
       dockerfile:
         type: string
         default: "./Dockerfile"
@@ -236,7 +237,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════
   signal:
     name: Signal Argo
-    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || (github.repository_owner == 'Coflnet' && github.event.repository.private && '["coflnet-devserver"]' || '["ubuntu-latest"]')) }}
     needs: build
     if: ${{ github.event_name != 'pull_request' }}
     permissions:
@@ -310,7 +311,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════
   cleanup:
     name: Expire old GHCR images
-    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || (github.repository_owner == 'Coflnet' && github.event.repository.private && '["coflnet-devserver"]' || '["ubuntu-latest"]')) }}
     needs: [build, signal]
     if: ${{ github.event_name != 'pull_request' && always() && needs.build.result != 'skipped' }}
     permissions:

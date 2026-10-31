@@ -84,6 +84,10 @@ on:
         default: ""
         description: "Branch name for GHCR tag (defaults to github.ref_name)"
       # ── Optional: Trivy scan before push ──
+      pass_changed_files:
+        type: boolean
+        default: false
+        description: "Pass the files changed by the pull request or push as the CHANGED_FILES build arg (one line, space-separated; `__too_many__`/`__unknown__` when no usable list exists) so the Dockerfile can run only the affected tests."
       scan_with_trivy:
         type: boolean
         default: false
@@ -137,6 +141,38 @@ jobs:
           echo "tag_branch=${TAG_BRANCH}" >> "$GITHUB_OUTPUT"
 
           echo "::notice::Building ${IMAGE}:${TAG_SHA} (branch: ${TAG_BRANCH})"
+
+      - name: List changed files for the build
+        id: changed
+        if: inputs.pass_changed_files
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          base=""
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+          esac
+          files="__unknown__"
+          if [[ "$base" =~ ^[0-9a-f]{40}$ ]] && [ "$base" != 0000000000000000000000000000000000000000 ] \
+            && git fetch --quiet --no-tags --depth=1 origin "$base" \
+            && list="$(git diff --name-only "$base" HEAD)"; then
+            count="$(printf '%s\n' "$list" | grep -c . || true)"
+            if [ "$count" -gt 2000 ]; then
+              files="__too_many__"
+            elif printf '%s\n' "$list" | grep -qvE '^[A-Za-z0-9._/@+-]*$'; then
+              files="__unknown__"
+            else
+              files="$(printf '%s\n' "$list" | tr '\n' ' ' | sed 's/ *$//')"
+            fi
+            echo "::notice::${count} changed files against ${base}"
+          else
+            echo "::notice::No usable base commit; CHANGED_FILES=__unknown__"
+          fi
+          echo "files=${files}" >> "$GITHUB_OUTPUT"
 
       - name: Select pull request test target
         id: build-target
@@ -196,6 +232,7 @@ jobs:
             NUGET_PASSWORD=${{ secrets.NUGET_PASSWORD }}
             NUXT_UI_PRO_LICENSE=${{ secrets.NUXT_UI_PRO_LICENSE }}
             HF_TOKEN=${{ secrets.HF_TOKEN }}
+            ${{ inputs.pass_changed_files && format('CHANGED_FILES={0}', steps.changed.outputs.files) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=min,ignore-error=true
 

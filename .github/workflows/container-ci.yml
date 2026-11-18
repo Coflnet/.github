@@ -50,6 +50,9 @@ on:
       HF_TOKEN:
         required: false
         description: "Optional HuggingFace access token"
+      SKYAIFINDER_TOKEN:
+        required: false
+        description: "Optional read token for Coflnet/SkyAIFinder, handed to the build as the BuildKit secret skyaifinder_token (never as a build arg)"
     inputs:
       runner:
         type: string
@@ -233,8 +236,13 @@ jobs:
             NUXT_UI_PRO_LICENSE=${{ secrets.NUXT_UI_PRO_LICENSE }}
             HF_TOKEN=${{ secrets.HF_TOKEN }}
             ${{ inputs.pass_changed_files && format('CHANGED_FILES={0}', steps.changed.outputs.files) || '' }}
+            ${{ secrets.SKYAIFINDER_TOKEN != '' && 'SKYAIFINDER_ENABLED=1' || '' }}
+          # BuildKit secrets are mounted only into RUN steps that ask for them and never end up in a layer.
+          # Without the secret nothing is passed and Dockerfiles that do not mount it are unaffected.
+          secrets: ${{ secrets.SKYAIFINDER_TOKEN != '' && format('skyaifinder_token={0}', secrets.SKYAIFINDER_TOKEN) || '' }}
           cache-from: type=gha
-          cache-to: type=gha,mode=min,ignore-error=true
+          # a build with the private SkyAIFinder sources exports no cache: the cache of a public repository is readable by its pull requests
+          cache-to: ${{ secrets.SKYAIFINDER_TOKEN == '' && 'type=gha,mode=min,ignore-error=true' || '' }}
 
       - name: Set up Trivy
         if: ${{ github.event_name != 'pull_request' && inputs.scan_with_trivy }}
